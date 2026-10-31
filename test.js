@@ -162,9 +162,17 @@ async function main() {
       check('non-image files in maps/ are not served', (await get('/maps/notes.txt', 'GET', PORT2)).status === 404);
 
       // world coordinates: a made-up map whose edges are X 0..1000 and Y -500..500
-      fs.writeFileSync(path.join(tmp, 'maps.json'), JSON.stringify({ maps: [
+      const slotMs = 20 * 60000, anchorMs = Math.floor(Date.now() / slotMs) * slotMs;          // the start of the current 20-minute slot
+      const rw = { x0: 0, x1: 1000, y0: -500, y1: 500 };
+      fs.writeFileSync(path.join(tmp, 'maps.json'), JSON.stringify({
+        rotations: [{ id: 'r', order: ['ra', 'rb', 'rc'], periodMin: 20, anchor: new Date(anchorMs).toISOString(), maxPlayers: 60, playlists: [7] }],
+        maps: [
+        { id: 'ra', name: 'Rot A', image: '/maps/zz-test-map.png', world: rw, pois: [] },
+        { id: 'rb', name: 'Rot B', image: '/maps/zz-test-map.png', world: rw, pois: [] },
+        { id: 'rc', name: 'Rot C', image: '/maps/zz-test-map.png', world: rw, pois: [] },
         { id: 'tmap', name: 'Test Map', image: '/maps/zz-test-map.png', scale: 1000, world: { x0: 0, x1: 1000, y0: -500, y1: 500 }, pois: [] },
         { id: 'noworld', name: 'No World', image: '/maps/zz-test-map.png', pois: [] },
+        { id: 'rot', name: 'Rot Map', image: '/maps/zz-test-map.png', levels: ['Test_Level'], world: { x0: 0, x1: 1000, y0: -500, y1: 500, u: 'y', v: '-x' }, pois: [] },
       ] }));
       await sleep(2300); // the server re-reads maps.json every couple of seconds
       const hv = await open('role=viewer', PORT2);
@@ -191,6 +199,36 @@ async function main() {
       check('world coordinates with no map are dropped', JSON.parse(await next(hv)).players.length === 0);
       hh.send(JSON.stringify({ connected: true, map: 'Test Map', players: [mk({ wx: 500, wy: 0 })] }));
       check('the map can be named by its display name', near(JSON.parse(await next(hv)).players[0].x, 0.5));
+
+      hh.send(JSON.stringify({ connected: true, map: 'rot', players: [mk({ wx: 250, wy: 0 }), mk({ wx: -500, wy: 1000 })] }));
+      const rf = JSON.parse(await next(hv));
+      check('a map can run the game\'s Y along the picture and -X down it (axes "y" / "-x")',
+        near(rf.players[0].x, 0) && near(rf.players[0].y, 0.25) && near(rf.players[1].x, 1) && near(rf.players[1].y, 1), JSON.stringify(rf.players));
+
+      const yw = (map, wyaw) => { hh.send(JSON.stringify({ connected: true, map, players: [mk({ wx: 1, wy: 1, wyaw })] })); return next(hv).then(m => JSON.parse(m).players[0].yaw); };
+      check('heading: game +X (0) is 90 on the default axes, +Y (90) is 180, -X (180) is 270', (await yw('tmap', 0)) === 90 && (await yw('tmap', 90)) === 180 && (await yw('tmap', 180)) === 270);
+      check('heading follows the map\'s axes: with "y" / "-x", game +X points up (0) and +Y points right (90)', (await yw('rot', 0)) === 0 && (await yw('rot', 90)) === 90);
+      hh.send(JSON.stringify({ connected: true, map: 'tmap', level: 'test_LEVEL', players: [mk({ wx: -500, wy: 1000 })] }));
+      const lf = JSON.parse(await next(hv));
+      check('the level name picks the map (case does not matter), even when the frame names another',
+        lf.map === 'rot' && lf.level === 'test_LEVEL' && near(lf.players[0].x, 1) && near(lf.players[0].y, 1), JSON.stringify(lf));
+      hh.send(JSON.stringify({ connected: true, map: 'tmap', level: 'Some_Other_Level', players: [mk({ wx: 250, wy: 0 })] }));
+      const uf = JSON.parse(await next(hv));
+      check('a level no map lists falls back to the frame\'s own map', uf.map === 'tmap' && near(uf.players[0].x, 0.25), JSON.stringify(uf));
+      const A = anchorMs / 1000;
+      const rotMap = async (extra) => { hh.send(JSON.stringify(Object.assign({ connected: true, map: 'tmap', players: [mk({ wx: 250, wy: 0 })] }, extra))); return JSON.parse(await next(hv)).map; };
+      check('Reload-sized matches (<= 60 players) take the map of the 20-minute slot they started in: A, B, C, then A again',
+        (await rotMap({ matchPlayers: 40, matchStart: A + 5 })) === 'ra' && (await rotMap({ matchPlayers: 40, matchStart: A + 1205 })) === 'rb' &&
+        (await rotMap({ matchPlayers: 40, matchStart: A + 2405 })) === 'rc' && (await rotMap({ matchPlayers: 41, matchStart: A + 3605 })) === 'ra');
+      check('a match that started in the previous slot keeps that slot\'s map (the slot before slot A is C)', (await rotMap({ matchPlayers: 40, matchStart: A - 100 })) === 'rc');
+      check('with no start time the clock decides, and a start time hours off is not trusted', (await rotMap({ matchPlayers: 40 })) === 'ra' && (await rotMap({ matchPlayers: 40, matchStart: A + 20 * 3600 + 1205 })) === 'ra' &&
+        (await rotMap({ matchPlayers: 40, matchStart: A - 20 * 3600 + 1205 })) === 'ra');
+      check('a big match (Battle Royale, ~100 players) does not use the rotation: the frame\'s own map is kept', (await rotMap({ matchPlayers: 100, matchStart: A + 1205 })) === 'tmap');
+      check('no player count (an older cheat) does not use it either', (await rotMap({ matchStart: A + 1205 })) === 'tmap');
+      check('a playlist the rotation lists applies it whatever the player count', (await rotMap({ playlist: 7, matchPlayers: 100, matchStart: A + 1205 })) === 'rb' && (await rotMap({ playlist: 8, matchPlayers: 100, matchStart: A + 1205 })) === 'tmap');
+      check('a level that names a map beats the rotation', (await rotMap({ level: 'Test_Level', matchPlayers: 40, matchStart: A + 1205 })) === 'rot');
+      hh.send(JSON.stringify({ connected: true, map: 'tmap', players: [mk({ x: 0.5, y: 0.5, yaw: 33 })] }));
+      check('a plain x / y player keeps the yaw it sent', JSON.parse(await next(hv)).players[0].yaw === 33);
       hh.close();
       hv.close();
     } finally {

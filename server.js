@@ -12,6 +12,10 @@
  *   wx / wy   Unreal world X / Y in cm, exactly as read from the actor. Needs the frame's
  *             "map" (an id or name from maps.json) to have "world" bounds; the server then does
  *             the conversion, so the cheat needs no map maths. If x / y are also sent they win.
+ * Top level "level": the game's own world name. A map entry in maps.json that lists it in "levels": ["Name"]
+ * is used for the frame (and viewers get its id as "map"); otherwise the frame's "map" is used.
+ *   wyaw      the heading in the game's own degrees (0 = +X, 90 = +Y); the server turns it into the
+ *             map's "yaw" on the same axes as the position.
  *
  * Optional per-player fields (the viewer uses them when they are there):
  *   id      stable number or string per player -> exact tracking between frames
@@ -109,26 +113,76 @@ const str = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/
 const posNum = (v, max) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, max) : 0);
 
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const AXES = ['x', 'y', '-x', '-y'];
+const pick = (src, a, b) => (src === 'x' ? a : src === 'y' ? b : src === '-x' ? -a : -b);   // a = the game's X, b = its Y
 const inView = v => Math.min(2, Math.max(-1, v));
 
-let mapsCache = { at: 0, mtime: -1, list: [] };
+let mapsCache = { at: 0, mtime: -1, list: [], rotations: [] };
 function getMaps() {
   const now = Date.now();
   if (now - mapsCache.at < 2000) return mapsCache.list;
   mapsCache.at = now;
   try {
     const m = fs.statSync(path.join(PUBLIC_DIR, 'maps.json')).mtimeMs;
-    if (m !== mapsCache.mtime) { mapsCache.mtime = m; mapsCache.list = listMaps().maps; }
+    if (m !== mapsCache.mtime) { mapsCache.mtime = m; const l = listMaps(); mapsCache.list = l.maps; mapsCache.rotations = l.rotations || []; }
   } catch {
     mapsCache.mtime = -1;
-    mapsCache.list = listMaps().maps;
+    const l = listMaps();
+    mapsCache.list = l.maps;
+    mapsCache.rotations = l.rotations || [];
   }
   return mapsCache.list;
+}
+
+// A rotation: maps that take turns on a fixed clock (Reload: 20-minute slots, three maps). { "id", "order": [map ids], "periodMin", "anchor": ISO time at which order[0] starts, "maxPlayers": it applies to
+// matches with at most that many players, "playlists": [ids] it applies to those playlists too }. The map of a match is the one of the slot its world appeared in (matchStart); a match that began
+// in one slot keeps its map when the next slot starts.
+function pickByRotation(matchPlayers, playlist, matchStartUnix) {
+  getMaps();
+  for (const r of mapsCache.rotations) {
+    if (!r || !Array.isArray(r.order) || !r.order.length || !isNum(r.periodMin) || r.periodMin <= 0) continue;
+    const anchor = Date.parse(r.anchor);
+    if (!Number.isFinite(anchor)) continue;
+    const byPlaylist = isNum(playlist) && Array.isArray(r.playlists) && r.playlists.includes(playlist);
+    const bySize = isNum(r.maxPlayers) && matchPlayers > 0 && matchPlayers <= r.maxPlayers;
+    if (!byPlaylist && !bySize) continue;
+    const now = Date.now();
+    let at = isNum(matchStartUnix) && matchStartUnix > 0 ? matchStartUnix * 1000 : now;
+    if (Math.abs(at - now) > 12 * 3600 * 1000) at = now;                          // a clock that is hours off is not to be trusted
+    const period = r.periodMin * 60000;
+    const n = r.order.length;
+    const slot = Math.floor((at - anchor) / period);
+    const id = r.order[((slot % n) + n) % n];
+    const map = getMaps().find(m => m && m.id === id);
+    if (map) return { map, rotation: r.id || '' };
+  }
+  return null;
 }
 function findMap(name) {
   const w = String(name || '').toLowerCase();
   if (!w) return null;
   return getMaps().find(m => m && (String(m.id || '').toLowerCase() === w || String(m.name || '').toLowerCase() === w)) || null;
+}
+
+function findMapByLevel(level) {
+  const w = String(level || '').toLowerCase();
+  if (!w) return null;
+  return getMaps().find(m => m && Array.isArray(m.levels) && m.levels.some(l => typeof l === 'string' && l.toLowerCase() === w)) || null;
+}
+
+const seenLevels = new Set();
+function noteLevel(level, map) {
+  if (!level || seenLevels.has(level) || seenLevels.size > 50) return;
+  seenLevels.add(level);
+  console.log('[radar] the game reports level "' + level + '" -> ' + (map ? 'map ' + map.id : 'no map lists it (the frame\'s own "map" is used)'));
+}
+
+const seenMatches = new Set();
+function noteMatch(playlist, players, rot) {
+  const key = playlist + '/' + (players >= 70 ? 'big' : players > 0 ? 'small' : '-') + '/' + (rot ? rot.map.id : '');
+  if (seenMatches.has(key) || seenMatches.size > 50) return;
+  seenMatches.add(key);
+  console.log('[radar] playlist ' + playlist + ', ' + players + ' players in the match -> ' + (rot ? 'rotation "' + rot.rotation + '": map ' + rot.map.id : 'no rotation applies (the frame\'s own "map" is used)'));
 }
 
 let lastWarnAt = 0;
@@ -146,23 +200,37 @@ function cleanFrame(text) {
   if (f.connected === false) return DISC;
   if (!Array.isArray(f.players)) return null;
 
+  // The cheat names the game's level (its own world name); a map in maps.json that lists it under "levels" is THE map for this frame. "map" is only the fallback for a level nobody listed.
+  const level = str(f.level, 64);
+  const byLevel = level ? findMapByLevel(level) : null;
+  noteLevel(level, byLevel);
+  const playlist = isNum(f.playlist) ? Math.trunc(f.playlist) : -1;
+  const matchPlayers = isNum(f.matchPlayers) ? Math.max(0, Math.min(1000, Math.trunc(f.matchPlayers))) : 0;
+  const matchStart = isNum(f.matchStart) ? Math.trunc(f.matchStart) : 0;
+  const rot = byLevel ? null : pickByRotation(matchPlayers, playlist, matchStart);
+  noteMatch(playlist, matchPlayers, rot);
   const mapName = str(f.map, 40);
-  const wm = mapName ? findMap(mapName) : null;
+  const wm = byLevel || (rot && rot.map) || (mapName ? findMap(mapName) : null);
   const w = wm && wm.world;
   const world = w && isNum(w.x0) && isNum(w.x1) && isNum(w.y0) && isNum(w.y1) && w.x1 !== w.x0 && w.y1 !== w.y0 ? w : null;
+  // which game axis runs along the image's horizontal (u) and vertical (v) direction: "x", "y", "-x" or "-y" (default u = x, v = y). x0 / x1 are the values of u's axis at the image's left / right edge,
+  // y0 / y1 the values of v's axis at its top / bottom edge. A map that comes out rotated or mirrored is fixed here, in maps.json, with no change to the cheat.
+  const uSrc = world && AXES.includes(world.u) ? world.u : 'x';
+  const vSrc = world && AXES.includes(world.v) ? world.v : 'y';
 
   const players = [];
   for (const p of f.players) {
     if (players.length >= MAX_PLAYERS) break;
     if (!p || typeof p !== 'object') continue;
 
-    let x, y;
+    let x, y, fromWorld = false;
     if (isNum(p.x) && isNum(p.y)) {
       x = p.x; y = p.y;
     } else if (isNum(p.wx) && isNum(p.wy)) {
       if (!world) { warnUnmapped(mapName, mapName ? 'that map has no "world" bounds' : 'the frame has no "map"'); continue; }
-      x = (p.wx - world.x0) / (world.x1 - world.x0);
-      y = (p.wy - world.y0) / (world.y1 - world.y0);
+      x = (pick(uSrc, p.wx, p.wy) - world.x0) / (world.x1 - world.x0);
+      y = (pick(vSrc, p.wx, p.wy) - world.y0) / (world.y1 - world.y0);
+      fromWorld = true;
     } else {
       continue;
     }
@@ -178,7 +246,11 @@ function cleanFrame(text) {
     if ((typeof p.id === 'number' && Number.isFinite(p.id)) || typeof p.id === 'string') {
       o.id = String(p.id).slice(0, 32);
     }
-    if (typeof p.yaw === 'number' && Number.isFinite(p.yaw)) {
+    if (fromWorld && isNum(p.wyaw)) {
+      const r = p.wyaw * Math.PI / 180, dx = Math.cos(r), dy = Math.sin(r);       // the game's heading (0 = +X, 90 = +Y) turned into "0 = up, clockwise" on this map's axes
+      const deg = Math.atan2(pick(uSrc, dx, dy), -pick(vSrc, dx, dy)) * 180 / Math.PI;
+      o.yaw = Math.round((((deg % 360) + 360) % 360) * 10) / 10;
+    } else if (typeof p.yaw === 'number' && Number.isFinite(p.yaw)) {
       o.yaw = Math.round((((p.yaw % 360) + 360) % 360) * 10) / 10;
     }
     const name = str(p.name, 24);
@@ -192,8 +264,9 @@ function cleanFrame(text) {
   }
 
   const out = { connected: true, players };
-  const map = str(f.map, 40);
+  const map = wm && wm.id ? str(String(wm.id), 48) : mapName;           // the id the viewer's "Automatic" matches
   if (map) out.map = map;
+  if (level) out.level = level;
   const scale = posNum(f.scale, 1e6);
   if (scale) out.scale = scale;
   const renderDistance = posNum(f.renderDistance, 1e6);
@@ -203,12 +276,13 @@ function cleanFrame(text) {
 
 // ── maps ────────────────────────────────────────────────────────────────────
 function listMaps() {
-  let custom = null;
+  let custom = null, rotations = [];
   try {
     const j = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'maps.json'), 'utf8'));
     if (j && Array.isArray(j.maps)) custom = j.maps;
+    if (j && Array.isArray(j.rotations)) rotations = j.rotations;
   } catch { /* none, or not valid: fall back to the folder */ }
-  if (custom) return { maps: custom };
+  if (custom) return rotations.length ? { maps: custom, rotations } : { maps: custom };
 
   let files = [];
   try { files = fs.readdirSync(MAPS_DIR).filter(n => IMAGE_NAME.test(n)).sort(); } catch { /* no folder */ }
