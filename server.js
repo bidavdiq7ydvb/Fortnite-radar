@@ -177,6 +177,130 @@ function noteLevel(level, map) {
   console.log('[radar] the game reports level "' + level + '" -> ' + (map ? 'map ' + map.id : 'no map lists it (the frame\'s own "map" is used)'));
 }
 
+// ── calibration: "click where you are" ───────────────────────────────────────
+// For a map whose bounds are only assumed (or unknown), the host's own position is paired with the spot an authorised viewer clicks as "I am here". One pair moves the map (its size and
+// orientation stay); two or more also solve the size, and the best of the 8 orientations is kept. Saved to calibration.json (RADAR_DATA, default ./data: on a free Render disk it lasts until the
+// next deploy, so a good result is copied into maps.json). Only a viewer that sent the radar's secret as a message (never in a URL) may do it.
+const DATA_DIR = process.env.RADAR_DATA || path.join(__dirname, 'data');
+const CALIB_FILE = path.join(DATA_DIR, 'calibration.json');
+const ORIENTS = [['x', 'y'], ['x', '-y'], ['-x', 'y'], ['-x', '-y'], ['y', 'x'], ['y', '-x'], ['-y', 'x'], ['-y', '-x']];
+let calib = {};
+try { calib = JSON.parse(fs.readFileSync(CALIB_FILE, 'utf8')) || {}; } catch { calib = {}; }
+function saveCalib() {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(CALIB_FILE, JSON.stringify(calib)); }
+  catch (e) { console.log('[radar] could not save the calibration: ' + e.message); }
+}
+let hostLocal = null;          // the cheat's own player in its last frame: { wx, wy, map, at }
+
+function worldOf(m) {
+  const c = m && calib[m.id];
+  return c && c.world ? c.world : (m && m.world) || null;
+}
+
+const meanOf = a => a.reduce((s, x) => s + x, 0) / a.length;
+function fitWorld(base, anchors) {
+  const baseU = AXES.includes(base.u) ? base.u : 'x', baseV = AXES.includes(base.v) ? base.v : 'y';
+  const baseSpan = Math.abs(base.x1 - base.x0);
+  const n = anchors.length;
+  const us = anchors.map(p => p.u), vs = anchors.map(p => p.v);
+  const spread = Math.hypot(Math.max(...us) - Math.min(...us), Math.max(...vs) - Math.min(...vs));
+  const canScale = n >= 2 && spread >= 0.08;
+  const mu = meanOf(us), mv = meanOf(vs);
+  const tryOrient = (ou, ov) => {
+    const a = anchors.map(p => pick(ou, p.wx, p.wy)), b = anchors.map(p => pick(ov, p.wx, p.wy));
+    const ma = meanOf(a), mb = meanOf(b);
+    let s = baseSpan;
+    if (canScale) {
+      let num = 0, den = 0;
+      for (let i = 0; i < n; i++) {
+        num += (us[i] - mu) * (a[i] - ma) + (vs[i] - mv) * (b[i] - mb);
+        den += (us[i] - mu) ** 2 + (vs[i] - mv) ** 2;
+      }
+      s = num / den;
+      if (!(s > baseSpan * 0.4 && s < baseSpan * 2.5)) return null;          // a size far from the assumed one is a bad click, not a different map
+    }
+    const x0 = ma - s * mu, y0 = mb - s * mv;
+    let ss = 0;
+    for (let i = 0; i < n; i++) ss += (a[i] - (x0 + s * us[i])) ** 2 + (b[i] - (y0 + s * vs[i])) ** 2;
+    return { world: { x0, x1: x0 + s, y0, y1: y0 + s, u: ou, v: ov }, rms: Math.sqrt(ss / n) };
+  };
+  const cur = tryOrient(baseU, baseV);
+  if (n < 2) return cur;
+  let best = cur;
+  for (const [ou, ov] of ORIENTS) {
+    const c = tryOrient(ou, ov);
+    if (c && (!best || c.rms < best.rms)) best = c;
+  }
+  return cur && best && cur.rms <= best.rms * 1.5 + 1500 ? cur : best;      // keep the orientation we have unless another one is clearly better
+}
+
+const round1 = v => Math.round(v * 10) / 10;
+function calSummary() {
+  const out = {};
+  for (const id of Object.keys(calib)) {
+    const c = calib[id];
+    if (c && c.world) out[id] = { world: c.world, anchors: (c.anchors || []).map(p => ({ u: p.u, v: p.v, wx: p.wx, wy: p.wy })), rmsM: round1((c.rms || 0) / 100) };
+  }
+  return out;
+}
+
+function badLimited(addr) {
+  const e = badSecrets.get(addr);
+  return !!e && e.n > BAD_SECRET_LIMIT && Date.now() - e.since <= 60000;
+}
+
+function handleViewerMessage(ws, data) {
+  const now = Date.now();                                   // a viewer has nothing to say 60 times a second
+  if (now - (ws.rateAt || 0) > 1000) { ws.rateAt = now; ws.rateN = 0; }
+  if (++ws.rateN > 60) { ws.terminate(); return; }
+
+  let m;
+  try { m = JSON.parse(data.toString('utf8')); } catch { return; }
+  if (!m || typeof m !== 'object') return;
+  const reply = o => { if (ws.readyState === 1) ws.send(JSON.stringify({ cal: o })); };
+
+  if (m.type === 'deauth') { ws.admin = false; return reply({ auth: false, why: 'locked' }); }
+  if (m.type === 'auth') {
+    // after too many wrong keys from one address the secret is not even looked at for a minute: guessing over one open connection must not be free
+    if (badLimited(ws.ip || '?')) return reply({ auth: false, why: 'too many wrong keys, wait a minute' });
+    if (secretOk(String(m.key || ''))) { ws.admin = true; return reply({ auth: true, maps: calSummary() }); }
+    const limited = noteBadSecret(ws.ip || '?');
+    return reply({ auth: false, why: limited ? 'too many wrong keys, wait a minute' : 'wrong key' });
+  }
+  if (m.type !== 'cal' && m.type !== 'calReset' && m.type !== 'calGet') return;
+  if (!ws.admin) return reply({ ok: false, why: 'locked: enter the radar secret first' });
+
+  if (m.type === 'calGet') return reply({ ok: true, maps: calSummary() });
+
+  const map = getMaps().find(x => x && x.id === m.map);
+  if (!map || !map.world) return reply({ ok: false, why: 'that map has no world bounds to adjust' });
+
+  if (m.type === 'calReset') {
+    delete calib[map.id];
+    saveCalib();
+    return reply({ ok: true, reset: true, map: map.id, maps: calSummary() });
+  }
+
+  if (!isNum(m.u) || !isNum(m.v) || m.u < -0.25 || m.u > 1.25 || m.v < -0.25 || m.v > 1.25) return reply({ ok: false, why: 'click on the map' });
+  const L = hostLocal;
+  if (!L || Date.now() - L.at > 8000) return reply({ ok: false, why: 'no fresh position from the cheat (is Rextra in a match, with the radar on?)' });
+  if (L.map !== map.id) return reply({ ok: false, why: 'the cheat is on "' + L.map + '", not "' + map.id + '": leave the map choice on Automatic' });
+
+  const rec = calib[map.id] || { anchors: [] };
+  const base = map.world;
+  rec.anchors = rec.anchors.filter(p => Math.hypot(p.wx - L.wx, p.wy - L.wy) > 300);   // the same spot again replaces the old click
+  rec.anchors.push({ wx: L.wx, wy: L.wy, u: m.u, v: m.v, at: Date.now() });
+  if (rec.anchors.length > 12) rec.anchors.shift();
+  const fit = fitWorld(base, rec.anchors);
+  if (!fit) return reply({ ok: false, why: 'those clicks do not fit one map (size far from expected): reset and try again' });
+  rec.world = { x0: round1(fit.world.x0), x1: round1(fit.world.x1), y0: round1(fit.world.y0), y1: round1(fit.world.y1), u: fit.world.u, v: fit.world.v };
+  rec.rms = fit.rms;
+  calib[map.id] = rec;
+  saveCalib();
+  console.log('[radar] calibration of ' + map.id + ': ' + rec.anchors.length + ' click(s), rms ' + round1(rec.rms / 100) + ' m, ' + JSON.stringify(rec.world));
+  reply({ ok: true, map: map.id, count: rec.anchors.length, rmsM: round1(rec.rms / 100), maps: calSummary() });
+}
+
 const seenMatches = new Set();
 function noteMatch(playlist, players, rot) {
   const key = playlist + '/' + (players >= 70 ? 'big' : players > 0 ? 'small' : '-') + '/' + (rot ? rot.map.id : '');
@@ -211,7 +335,7 @@ function cleanFrame(text) {
   noteMatch(playlist, matchPlayers, rot);
   const mapName = str(f.map, 40);
   const wm = byLevel || (rot && rot.map) || (mapName ? findMap(mapName) : null);
-  const w = wm && wm.world;
+  const w = worldOf(wm);
   const world = w && isNum(w.x0) && isNum(w.x1) && isNum(w.y0) && isNum(w.y1) && w.x1 !== w.x0 && w.y1 !== w.y0 ? w : null;
   // which game axis runs along the image's horizontal (u) and vertical (v) direction: "x", "y", "-x" or "-y" (default u = x, v = y). x0 / x1 are the values of u's axis at the image's left / right edge,
   // y0 / y1 the values of v's axis at its top / bottom edge. A map that comes out rotated or mirrored is fixed here, in maps.json, with no change to the cheat.
@@ -231,6 +355,7 @@ function cleanFrame(text) {
       x = (pick(uSrc, p.wx, p.wy) - world.x0) / (world.x1 - world.x0);
       y = (pick(vSrc, p.wx, p.wy) - world.y0) / (world.y1 - world.y0);
       fromWorld = true;
+      if (p.isLocal === true) hostLocal = { wx: p.wx, wy: p.wy, map: wm ? wm.id : '', at: Date.now() };
     } else {
       continue;
     }
@@ -446,14 +571,16 @@ function attachViewer(ws) {
   viewers.add(ws);
   console.log('[radar] viewer connected  total:', viewers.size);
   ws.send(host ? lastFrame : DISC);
+  ws.on('message', data => handleViewerMessage(ws, data));
   ws.on('close', () => {
     viewers.delete(ws);
     console.log('[radar] viewer left  total:', viewers.size);
   });
 }
 
-wss.on('connection', ws => {
+wss.on('connection', (ws, req) => {
   ws.lastSeen = Date.now();
+  ws.ip = clientAddress(req);
   ws.on('pong', () => { ws.lastSeen = Date.now(); });
   ws.on('error', () => {});
   if (ws.role === 'host') attachHost(ws);

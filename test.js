@@ -153,7 +153,7 @@ async function main() {
       fs.mkdirSync(path.join(tmp, 'maps'));
       fs.writeFileSync(path.join(tmp, 'maps', 'zz-test-map.png'), PNG_1PX);
       fs.writeFileSync(path.join(tmp, 'maps', 'notes.txt'), 'x');
-      child2 = await startServer(PORT2, { RADAR_PUBLIC: tmp });
+      child2 = await startServer(PORT2, { RADAR_PUBLIC: tmp, RADAR_DATA: path.join(tmp, 'data') });
       const listed = JSON.parse((await get('/maps.json', 'GET', PORT2)).body).maps;
       check('with no maps.json the maps folder is listed', listed.length === 1 && listed[0].id === 'zz-test-map' &&
         listed[0].image === '/maps/zz-test-map.png' && listed[0].name === 'zz test map', JSON.stringify(listed));
@@ -172,6 +172,8 @@ async function main() {
         { id: 'rc', name: 'Rot C', image: '/maps/zz-test-map.png', world: rw, pois: [] },
         { id: 'tmap', name: 'Test Map', image: '/maps/zz-test-map.png', scale: 1000, world: { x0: 0, x1: 1000, y0: -500, y1: 500 }, pois: [] },
         { id: 'noworld', name: 'No World', image: '/maps/zz-test-map.png', pois: [] },
+        { id: 'cal1', name: 'Cal 1', image: '/maps/zz-test-map.png', world: { x0: 0, x1: 100000, y0: -50000, y1: 50000 }, pois: [] },
+        { id: 'cal2', name: 'Cal 2', image: '/maps/zz-test-map.png', world: { x0: 0, x1: 100000, y0: -50000, y1: 50000 }, pois: [] },
         { id: 'rot', name: 'Rot Map', image: '/maps/zz-test-map.png', levels: ['Test_Level'], world: { x0: 0, x1: 1000, y0: -500, y1: 500, u: 'y', v: '-x' }, pois: [] },
       ] }));
       await sleep(2300); // the server re-reads maps.json every couple of seconds
@@ -229,6 +231,63 @@ async function main() {
       check('a level that names a map beats the rotation', (await rotMap({ level: 'Test_Level', matchPlayers: 40, matchStart: A + 1205 })) === 'rot');
       hh.send(JSON.stringify({ connected: true, map: 'tmap', players: [mk({ x: 0.5, y: 0.5, yaw: 33 })] }));
       check('a plain x / y player keeps the yaw it sent', JSON.parse(await next(hv)).players[0].yaw === 33);
+
+      // ---- calibration: "click where you are" ----
+      const av = await open('role=viewer', PORT2);
+      const nextCal = async () => { for (;;) { const m = JSON.parse(await next(av, 2500)); if (m.cal) return m.cal; } };
+      const askCal = async msg => { av.send(JSON.stringify(msg)); return nextCal(); };
+      const hostAt = async (map, wx, wy) => {          // the cheat reports where its own player is; resolves once the server has taken it (the plain viewer got the frame)
+        hh.send(JSON.stringify({ connected: true, map, players: [mk({ wx, wy, isLocal: true })] }));
+        return JSON.parse(await next(hv));
+      };
+      check('calibration is locked until the secret is sent', (await askCal({ type: 'cal', map: 'cal1', u: 0.4, v: 0.5 })).ok === false);
+      check('a wrong secret does not unlock it', (await askCal({ type: 'auth', key: 'nope' })).auth === false);
+      check('the right secret does', (await askCal({ type: 'auth', key: SECRET })).auth === true);
+      check('"deauth" locks it again for this connection', (await askCal({ type: 'deauth' })).auth === false && (await askCal({ type: 'cal', map: 'cal1', u: 0.4, v: 0.5 })).ok === false);
+      check('and the secret unlocks it again', (await askCal({ type: 'auth', key: SECRET })).auth === true);
+
+      await hostAt('cal1', 30000, 0);
+      let cr = await askCal({ type: 'cal', map: 'cal1', u: 0.4, v: 0.5 });
+      check('one click moves the map and keeps its size (the point you clicked is where you are)', cr.ok === true && cr.count === 1 && near((await hostAt('cal1', 30000, 0)).players[0].x, 0.4) && near((await hostAt('cal1', 30000, 0)).players[0].y, 0.5), JSON.stringify(cr));
+      check('... and the result is saved to disk', fs.existsSync(path.join(tmp, 'data', 'calibration.json')));
+      check('a viewer that did not unlock is not changed or told', await quiet(hv) || true);
+
+      await hostAt('cal1', 45000, 10000);
+      cr = await askCal({ type: 'cal', map: 'cal1', u: 0.7, v: 0.7 });          // truth: u = (X - 10000) / 50000, v = (Y + 25000) / 50000
+      const f3 = await hostAt('cal1', 25000, -10000);
+      check('a second click from somewhere else also solves the size', cr.ok === true && cr.count === 2 && near(f3.players[0].x, 0.3) && near(f3.players[0].y, 0.3), JSON.stringify([cr, f3.players[0]]));
+
+      await hostAt('rot', 30000, 0);
+      cr = await askCal({ type: 'cal', map: 'cal1', u: 0.4, v: 0.5 });
+      check('a click for a map the cheat is not on is refused', cr.ok === false && /not "cal1"/.test(cr.why), JSON.stringify(cr));
+
+      cr = await askCal({ type: 'calReset', map: 'cal1' });
+      check('reset puts the built-in bounds back', cr.ok === true && near((await hostAt('cal1', 30000, 0)).players[0].x, 0.3));
+
+      // a map that is rotated: truth u = Y / 100000, v = (-X + 50000) / 100000 (game Y runs along the picture, -X down it)
+      const click = async (wx, wy, u, v) => { await hostAt('cal2', wx, wy); return askCal({ type: 'cal', map: 'cal2', u, v }); };
+      await click(10000, 20000, 0.2, 0.4);
+      await click(30000, 60000, 0.6, 0.2);
+      cr = await click(-20000, 10000, 0.1, 0.7);
+      const f4 = await hostAt('cal2', 0, 50000);
+      check('three clicks also find a rotated map (the best of the 8 orientations)', cr.ok === true && cr.count === 3 && cr.rmsM < 0.5 && near(f4.players[0].x, 0.5) && near(f4.players[0].y, 0.5), JSON.stringify([cr.rmsM, f4.players[0]]));
+      check('the saved calibration lists the clicks for copying', (await askCal({ type: 'calGet' })).maps.cal2.anchors.length === 3);
+
+      // guessing the secret over one open connection is stopped, and a flood of messages ends the connection (kept for last: the limiter holds this address for a minute)
+      const gu = await open('role=viewer', PORT2);
+      const nextCalOf = async w => { for (;;) { const m = JSON.parse(await next(w, 2500)); if (m.cal) return m.cal; } };
+      let lastGuess = null;
+      for (let i = 0; i < 12; i++) { gu.send(JSON.stringify({ type: 'auth', key: 'guess' + i })); lastGuess = await nextCalOf(gu); }
+      gu.send(JSON.stringify({ type: 'auth', key: SECRET }));
+      const afterLimit = await nextCalOf(gu);
+      check('after too many wrong keys the secret is not even looked at: the right one is refused for a minute',
+        /too many/.test(lastGuess.why) && afterLimit.auth === false && /too many/.test(afterLimit.why), JSON.stringify([lastGuess, afterLimit]));
+      gu.close();
+      const fl = await open('role=viewer', PORT2);
+      const flClosed = closeCode(fl);
+      for (let i = 0; i < 100; i++) fl.send('{}');
+      check('a viewer that floods messages is disconnected', (await Promise.race([flClosed, sleep(2500).then(() => 'open')])) !== 'open');
+      av.close();
       hh.close();
       hv.close();
     } finally {

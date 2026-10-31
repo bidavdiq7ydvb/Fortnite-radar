@@ -89,6 +89,13 @@ select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-
 .hb .h,.hb .s{position:absolute;left:0;top:0;bottom:0}
 .hb .s{top:auto;height:2px;background:#4a9dff}
 .hb .h{background:#22cc44}
+.btn{display:block;width:100%;margin-top:8px;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-radius:8px;background:rgba(255,255,255,.04);color:var(--text);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.btn:hover{background:rgba(255,255,255,.08)}
+.btn.on{border-color:#ff3df0;color:#ff9cf6}
+#cal-key{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-radius:8px;background:#06070f;color:var(--text);font:inherit;font-size:12px;margin-top:6px}
+.calmsg{margin-top:10px;font-size:11px;line-height:1.45;color:var(--dim)}
+#cal-out{width:100%;height:64px;margin-top:8px;background:#06070f;color:var(--dim);border:1px solid var(--line);border-radius:8px;font:10px ui-monospace,Menlo,Consolas,monospace;resize:vertical}
+#calbanner{position:absolute;left:50%;top:12px;transform:translateX(-50%);padding:8px 14px;border-radius:8px;background:rgba(255,61,240,.92);color:#fff;font-size:13px;font-weight:700;pointer-events:none;z-index:6;white-space:nowrap}
 #pempty{color:var(--dim);font-size:11px;text-align:center;padding:10px 0 2px}
 </style>
 </head>
@@ -99,6 +106,7 @@ select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-
   <canvas id="c"></canvas>
   <div id="mapid" class="hidden"></div>
   <div id="coord" class="hidden"></div>
+  <div id="calbanner" class="hidden">Click on the map where you are standing</div>
   <button id="b-side" class="fab" aria-label="Show or hide the panel"><svg viewBox="0 0 24 24"><path id="chev" d="M9 5l7 7-7 7"/></svg></button>
   <div id="zoom">
     <button id="b-in" class="fab" aria-label="Zoom in">+</button>
@@ -128,6 +136,25 @@ select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-
         <div id="more-h"><i>&#9660;</i> More Options</div>
         <div id="more-b"></div>
       </div>
+    </div>
+  </section>
+
+  <section class="panel collapsed" id="p-calib">
+    <header><h3>CALIBRATE MAP</h3><button class="fold" aria-label="Collapse">&#9660;</button></header>
+    <div class="body">
+      <div id="cal-lock">
+        <div class="lbl">Radar secret (only you; kept in this browser)</div>
+        <input id="cal-key" type="password" autocomplete="off" placeholder="the RADAR_SECRET">
+        <button id="cal-unlock" class="btn">Unlock</button>
+      </div>
+      <div id="cal-tools" class="hidden">
+        <button id="cal-set" class="btn">Set my position</button>
+        <button id="cal-reset" class="btn">Reset this map</button>
+        <button id="cal-copy" class="btn">Copy calibration</button>
+        <button id="cal-lockbtn" class="btn">Lock (forget the secret)</button>
+        <textarea id="cal-out" readonly spellcheck="false" placeholder="the calibration shows here"></textarea>
+      </div>
+      <div id="cal-msg" class="calmsg">If your dot is in the wrong place on a map, unlock this, stand somewhere you can recognise, press Set my position and click where you really are. Two or three clicks from different places fix the size too.</div>
     </div>
   </section>
 
@@ -196,7 +223,7 @@ DEFS.forEach(function (d) {
 $('p-players').classList.toggle('hidden', !cfg.list);
 
 // panels fold
-['p-settings', 'p-players'].forEach(function (id) {
+['p-settings', 'p-calib', 'p-players'].forEach(function (id) {
   $(id).querySelector('header').addEventListener('click', function () { $(id).classList.toggle('collapsed'); });
 });
 $('more-h').addEventListener('click', function () { $('more').classList.toggle('collapsed'); });
@@ -429,7 +456,7 @@ cvs.addEventListener('pointermove', function (e) {
 });
 function release(e) {
   var p = rel(e);
-  if (tap && !tap.moved && ptrs[e.pointerId]) pickAt(p.x, p.y);
+  if (tap && !tap.moved && ptrs[e.pointerId]) { if (calMode) sendCalClick(p.x, p.y); else pickAt(p.x, p.y); }
   delete ptrs[e.pointerId];
   tap = null;
 }
@@ -456,7 +483,7 @@ $('b-in').addEventListener('click', function () { zoomAt(W / 2, H / 2, 1.5); });
 $('b-out').addEventListener('click', function () { zoomAt(W / 2, H / 2, 1 / 1.5); });
 $('b-fit').addEventListener('click', function () { view.zoom = 1; view.cx = 0.5; view.cy = 0.5; clampView(); });
 window.addEventListener('keydown', function (e) {
-  if (e.target && e.target.tagName === 'SELECT') return;
+  if (e.target && /^(SELECT|INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
   if (e.key === '+' || e.key === '=') zoomAt(W / 2, H / 2, 1.5);
   else if (e.key === '-') zoomAt(W / 2, H / 2, 1 / 1.5);
   else if (e.key === 'f' || e.key === 'F') setCfg('follow', !cfg.follow);
@@ -731,6 +758,7 @@ function draw() {
 
   for (i = 0; i < ents.length; i++) if (shown(ents[i])) drawEnt(ents[i], ox, oy, S);
 
+  drawCalAnchors(ox, oy, S);
   drawScaleBar(S);
 
   if (cfg.cross) {
@@ -826,6 +854,95 @@ $('plist').addEventListener('pointerup', function (ev) {
 $('plist').addEventListener('pointercancel', function () { rowDown = null; });
 $('track').addEventListener('click', function () { trackUid = 0; });
 
+// ── calibration: click where you are (needs the radar's secret; sent as a message, never in the address) ──
+var calKey = fetchStored('radar.calkey') || '', isAdmin = false, calMode = false, calMaps = {};
+var elCalMsg = $('cal-msg'), elCalOut = $('cal-out');
+function calSay(t) { elCalMsg.textContent = t; }
+function calUi() {
+  $('cal-lock').classList.toggle('hidden', isAdmin);
+  $('cal-tools').classList.toggle('hidden', !isAdmin);
+  $('cal-set').textContent = calMode ? 'Cancel (then click on the map)' : 'Set my position';
+  $('cal-set').classList.toggle('on', calMode);
+  $('calbanner').classList.toggle('hidden', !calMode);
+  cvs.style.cursor = calMode ? 'crosshair' : '';
+}
+function calSend(o) {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(o)); return true; }
+  calSay('Not connected to the radar yet.');
+  return false;
+}
+function handleCal(c) {
+  if (c.auth !== undefined) {
+    isAdmin = !!c.auth;
+    if (isAdmin) {
+      calMaps = c.maps || {};
+      elCalOut.value = Object.keys(calMaps).length ? JSON.stringify(calMaps, null, 1) : '';
+      store('radar.calkey', calKey);
+      calSay('Unlocked. Stand somewhere you can recognise, press Set my position, then click where you are on the map.');
+    } else {
+      calKey = '';
+      store('radar.calkey', '');
+      calSay(c.why || 'Wrong key.');
+    }
+    calUi();
+    return;
+  }
+  if (c.maps) { calMaps = c.maps; elCalOut.value = JSON.stringify(calMaps, null, 1); }
+  if (c.ok === false) calSay(c.why || 'That did not work.');
+  else if (c.reset) calSay('Calibration cleared for this map (back to the built-in one).');
+  else if (c.count) calSay('Saved: ' + c.count + ' click' + (c.count === 1 ? '' : 's') + ', fit error about ' + c.rmsM + ' m. ' + (c.count < 3 ? 'Do it again from somewhere else for a better fit.' : 'Good.'));
+  calMode = false;
+  calUi();
+}
+function unlockCal() {
+  calKey = $('cal-key').value.trim();
+  $('cal-key').value = '';
+  if (calKey) calSend({ type: 'auth', key: calKey });
+}
+$('cal-unlock').addEventListener('click', unlockCal);
+$('cal-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') unlockCal(); });
+$('cal-set').addEventListener('click', function () {
+  calMode = !calMode;
+  calUi();
+  if (calMode) calSay('Click on the map exactly where you are standing now (zoom in first for a better click).');
+});
+$('cal-lockbtn').addEventListener('click', function () {
+  calSend({ type: 'deauth' });
+  calKey = '';
+  store('radar.calkey', '');
+  isAdmin = false;
+  calMode = false;
+  calUi();
+  calSay('Locked. The secret is forgotten by this browser.');
+});
+$('cal-reset').addEventListener('click', function () { var m = currentMap(); if (m) calSend({ type: 'calReset', map: m.id }); });
+$('cal-copy').addEventListener('click', function () {
+  calSend({ type: 'calGet' });
+  setTimeout(function () {
+    try { navigator.clipboard.writeText(elCalOut.value).then(function () { calSay('Copied. Paste it where it is needed.'); }, function () { calSay('Select the text below and copy it.'); }); }
+    catch (e) { calSay('Select the text below and copy it.'); }
+  }, 500);
+});
+function sendCalClick(px, py) {
+  var m = currentMap();
+  if (!m) return;
+  var S = mapPx();
+  calSend({ type: 'cal', map: m.id, u: view.cx + (px - W / 2) / S, v: view.cy + (py - H / 2) / S });
+}
+function drawCalAnchors(ox, oy, S) {
+  var m = currentMap();
+  if (!isAdmin || !m || !calMaps[m.id]) return;
+  var a = calMaps[m.id].anchors || [], i, x, y;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#ff3df0';
+  for (i = 0; i < a.length; i++) {
+    x = ox + a[i].u * S; y = oy + a[i].v * S;
+    ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); ctx.stroke();
+    label(String(i + 1), x + 11, y - 7, '#ff9cf6');
+  }
+}
+calUi();
+
 // ── socket ──
 var ws = null, wsAlive = false, hostUp = false, lastFrameAt = 0, retry = null;
 function connect() {
@@ -840,12 +957,17 @@ function connect() {
     return;
   }
   ws = sock;
-  sock.onopen = function () { if (sock === ws) wsAlive = true; };
+  sock.onopen = function () {
+    if (sock !== ws) return;
+    wsAlive = true;
+    if (calKey) sock.send(JSON.stringify({ type: 'auth', key: calKey }));          // a stored secret unlocks calibration again after a reconnect
+  };
   sock.onmessage = function (ev) {
     if (sock !== ws) return;
     var f;
     try { f = JSON.parse(ev.data); } catch (err) { return; }
     if (!f || typeof f !== 'object') return;
+    if (f.cal && typeof f.cal === 'object') { handleCal(f.cal); return; }
     if (f.connected && Array.isArray(f.players)) {
       var t = performance.now();
       if (hostUp && lastFrameAt) {
@@ -863,6 +985,9 @@ function connect() {
   };
   sock.onclose = function () {
     if (sock !== ws) return;
+    isAdmin = false;
+    calMode = false;
+    calUi();
     wsAlive = false;
     hostUp = false;
     ents = [];
