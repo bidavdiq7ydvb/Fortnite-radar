@@ -1,0 +1,15 @@
+{
+  "name": "fortnite-radar",
+  "version": "1.0.0",
+  "description": "DMA Fortnite web radar — WebSocket broadcast server + canvas viewer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
