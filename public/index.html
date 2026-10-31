@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#04070b">
+<title>Radar</title>
+<style>
+html,body{margin:0;height:100%;background:#04070b;overflow:hidden;overscroll-behavior:none;font-family:ui-monospace,Menlo,Consolas,monospace;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+canvas:active{cursor:grabbing}
+#hud{position:fixed;top:max(10px,env(safe-area-inset-top));left:max(12px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:3px;font-size:11px;color:#5d7088;pointer-events:none;z-index:3}
+#hud b{font-size:12px;letter-spacing:.08em}
+#ctl{position:fixed;right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:8px;z-index:5}
+#ctl button{min-width:46px;height:46px;padding:0 10px;border:1px solid #1d2c3d;border-radius:10px;background:rgba(10,16,24,.82);color:#9fb3c8;font:inherit;font-size:18px;cursor:pointer;touch-action:manipulation}
+#ctl button#b-follow{font-size:11px;letter-spacing:.06em}
+#ctl button[aria-pressed="true"]{border-color:#00ff88;color:#00ff88}
+#ctl button:active{background:rgba(30,46,64,.9)}
+#disc{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;pointer-events:none;z-index:4}
+#disc p{margin:0;color:#ff3344;font-size:clamp(14px,3.5vw,28px);letter-spacing:.15em;font-weight:bold;text-align:center}
+#disc small{color:#4a5a6c;font-size:11px;letter-spacing:.05em}
+#disc.stale p{color:#ffb020}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><b id="h-status">CONNECTING</b><span id="h-counts"></span><span id="h-rate"></span></div>
+<div id="ctl">
+  <button id="b-in" aria-label="Zoom in">+</button>
+  <button id="b-out" aria-label="Zoom out">-</button>
+  <button id="b-follow" aria-pressed="true" aria-label="Follow me">FOLLOW</button>
+</div>
+<div id="disc"><p id="d-title">DMA DISCONNECTED</p><small id="d-sub">connecting...</small></div>
+<script>
+(function () {
+'use strict';
+
+var $ = function (id) { return document.getElementById(id); };
+var cvs = $('c'), ctx = cvs.getContext('2d');
+var elStatus = $('h-status'), elCounts = $('h-counts'), elRate = $('h-rate');
+var elDisc = $('disc'), elTitle = $('d-title'), elSub = $('d-sub'), bFollow = $('b-follow');
+
+var COL_ME = '#00ff88', COL_TEAM = '#3399ff', COL_ENEMY = '#ff3344';
+var STALE_MS = 3000;
+var MIN_ZOOM = 1, MAX_ZOOM = 24;
+
+var W = 0, H = 0, dpr = 1;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  cvs.width = Math.round(W * dpr);
+  cvs.height = Math.round(H * dpr);
+  clampView();
+}
+
+// ── map image (optional: put map.png / map.jpg / map.webp in the public folder) ──
+var mapImg = new Image(), mapOk = false;
+mapImg.onload = function () { mapOk = true; };
+mapImg.src = '/map';
+
+// ── view ──
+var view = { zoom: 1, cx: 0.5, cy: 0.5, follow: true };
+function mapPx() { return Math.min(W, H) * view.zoom; }
+function clampView() {
+  var S = mapPx(), hx = W / 2 / S, hy = H / 2 / S;
+  view.cx = hx >= 0.5 ? 0.5 : Math.min(1 - hx, Math.max(hx, view.cx));
+  view.cy = hy >= 0.5 ? 0.5 : Math.min(1 - hy, Math.max(hy, view.cy));
+}
+function setFollow(on) {
+  view.follow = on;
+  bFollow.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+function zoomAt(px, py, factor) {
+  var z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.zoom * factor));
+  if (view.follow) {
+    view.zoom = z;
+  } else {
+    var S0 = mapPx(), mx = view.cx + (px - W / 2) / S0, my = view.cy + (py - H / 2) / S0;
+    view.zoom = z;
+    var S1 = mapPx();
+    view.cx = mx - (px - W / 2) / S1;
+    view.cy = my - (py - H / 2) / S1;
+  }
+  clampView();
+}
+function panBy(dx, dy) {
+  if (view.follow) setFollow(false);
+  var S = mapPx();
+  view.cx -= dx / S;
+  view.cy -= dy / S;
+  clampView();
+}
+
+var ptrs = {};
+cvs.addEventListener('pointerdown', function (e) {
+  try { cvs.setPointerCapture(e.pointerId); } catch (err) {}
+  ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+});
+cvs.addEventListener('pointermove', function (e) {
+  var p = ptrs[e.pointerId];
+  if (!p) return;
+  var ids = Object.keys(ptrs);
+  if (ids.length >= 2) {
+    var a = ptrs[ids[0]], b = ptrs[ids[1]];
+    var d0 = Math.hypot(a.x - b.x, a.y - b.y);
+    p.x = e.clientX; p.y = e.clientY;
+    var d1 = Math.hypot(a.x - b.x, a.y - b.y);
+    if (d0 > 0 && d1 > 0) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, d1 / d0);
+    return;
+  }
+  panBy(e.clientX - p.x, e.clientY - p.y);
+  p.x = e.clientX; p.y = e.clientY;
+});
+function dropPointer(e) { delete ptrs[e.pointerId]; }
+cvs.addEventListener('pointerup', dropPointer);
+cvs.addEventListener('pointercancel', dropPointer);
+cvs.addEventListener('wheel', function (e) {
+  e.preventDefault();
+  var dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.0015));
+}, { passive: false });
+
+$('b-in').addEventListener('click', function () { zoomAt(W / 2, H / 2, 1.5); });
+$('b-out').addEventListener('click', function () { zoomAt(W / 2, H / 2, 1 / 1.5); });
+bFollow.addEventListener('click', function () { setFollow(!view.follow); });
+window.addEventListener('keydown', function (e) {
+  if (e.key === '+' || e.key === '=') zoomAt(W / 2, H / 2, 1.5);
+  else if (e.key === '-') zoomAt(W / 2, H / 2, 1 / 1.5);
+  else if (e.key === 'f' || e.key === 'F') setFollow(!view.follow);
+});
+
+// ── players ──
+var ents = [];
+function sq(v) { return v * v; }
+
+function applyFrame(list) {
+  var prev = ents, taken = [], out = [], byId = {}, i, j, myTeam = null;
+  for (j = 0; j < prev.length; j++) if (prev[j].key) byId[prev[j].key] = j;
+  for (i = 0; i < list.length; i++) if (list[i].isLocal) { myTeam = list[i].team; break; }
+
+  for (i = 0; i < list.length; i++) {
+    var p = list[i], key = p.id !== undefined ? 'i' + p.id : null, m = -1;
+    if (key) {
+      if (byId[key] !== undefined && !taken[byId[key]]) m = byId[key];
+    } else {
+      var best = 0.01;
+      for (j = 0; j < prev.length; j++) {
+        var c = prev[j];
+        if (taken[j] || c.key || c.isLocal !== p.isLocal || c.team !== p.team) continue;
+        var d = sq(c.x - p.x) + sq(c.y - p.y);
+        if (d < best) { best = d; m = j; }
+      }
+    }
+    var e;
+    if (m >= 0) {
+      taken[m] = true;
+      e = prev[m];
+      if (sq(e.dx - p.x) + sq(e.dy - p.y) > 0.04) { e.dx = p.x; e.dy = p.y; }
+    } else {
+      e = { dx: p.x, dy: p.y, dyaw: p.yaw || 0 };
+    }
+    e.key = key;
+    e.x = p.x; e.y = p.y;
+    e.isLocal = p.isLocal; e.team = p.team;
+    e.hp = p.hp; e.shield = p.shield;
+    e.hasYaw = typeof p.yaw === 'number';
+    e.yaw = p.yaw || 0;
+    e.name = p.name || '';
+    e.down = !!p.down;
+    e.rank = p.isLocal ? 2 : (myTeam !== null && p.team === myTeam ? 1 : 0);
+    out.push(e);
+  }
+  out.sort(function (a, b) { return a.rank - b.rank; });
+  ents = out;
+}
+
+function step(dt) {
+  var a = 1 - Math.exp(-dt / 0.05), i, e, diff, local = null;
+  for (i = 0; i < ents.length; i++) {
+    e = ents[i];
+    e.dx += (e.x - e.dx) * a;
+    e.dy += (e.y - e.dy) * a;
+    diff = ((e.yaw - e.dyaw + 540) % 360) - 180;
+    e.dyaw += diff * a;
+    if (e.isLocal) local = e;
+  }
+  if (view.follow && local) { view.cx = local.dx; view.cy = local.dy; }
+  clampView();
+}
+
+// ── drawing ──
+function drawGrid(ox, oy, S) {
+  var minor = S * 0.025 >= 36, n = minor ? 40 : 10, every = minor ? 4 : 1, i, p, v;
+  ctx.lineWidth = 1;
+  for (i = 0; i <= n; i++) {
+    ctx.strokeStyle = i % every === 0 ? 'rgba(80,120,160,.24)' : 'rgba(80,120,160,.09)';
+    p = i / n * S;
+    v = ox + p;
+    if (v >= -1 && v <= W + 1) {
+      ctx.beginPath(); ctx.moveTo(v, Math.max(oy, 0)); ctx.lineTo(v, Math.min(oy + S, H)); ctx.stroke();
+    }
+    v = oy + p;
+    if (v >= -1 && v <= H + 1) {
+      ctx.beginPath(); ctx.moveTo(Math.max(ox, 0), v); ctx.lineTo(Math.min(ox + S, W), v); ctx.stroke();
+    }
+  }
+}
+
+function drawEnt(e, ox, oy, S) {
+  var sx = ox + e.dx * S, sy = oy + e.dy * S;
+  if (sx < -40 || sx > W + 40 || sy < -40 || sy > H + 40) return;
+  var col = e.rank === 2 ? COL_ME : (e.rank === 1 ? COL_TEAM : COL_ENEMY);
+  var R = e.isLocal ? 7 : 6;
+
+  if (e.hasYaw && !e.down) {
+    var ang = (e.dyaw - 90) * Math.PI / 180;
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.arc(sx, sy, R + 14, ang - 0.5, ang + 0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.shadowColor = col;
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.arc(sx, sy, R, 0, Math.PI * 2);
+  if (e.down) {
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+  ctx.restore();
+
+  if (e.isLocal) {
+    ctx.strokeStyle = 'rgba(0,255,136,.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(sx, sy, R + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  var bw = 26, bh = 3, bx = sx - bw / 2, by = sy + R + 4;
+  ctx.fillStyle = '#0d1520';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = e.hp > 50 ? '#22cc44' : (e.hp > 25 ? '#ddaa00' : '#ff4422');
+  ctx.fillRect(bx, by, bw * e.hp / 100, bh);
+  if (e.shield > 0) {
+    ctx.fillStyle = '#0d1520';
+    ctx.fillRect(bx, by + bh + 1, bw, bh);
+    ctx.fillStyle = '#4499ff';
+    ctx.fillRect(bx, by + bh + 1, bw * e.shield / 100, bh);
+  }
+
+  if (e.name && view.zoom >= 2.5) {
+    ctx.font = '10px ui-monospace,Menlo,Consolas,monospace';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#c8d6e5';
+    ctx.fillText(e.name, sx, sy - R - 6);
+  }
+}
+
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#04070b';
+  ctx.fillRect(0, 0, W, H);
+
+  var S = mapPx(), ox = W / 2 - view.cx * S, oy = H / 2 - view.cy * S;
+  ctx.fillStyle = '#0a1018';
+  ctx.fillRect(ox, oy, S, S);
+  if (mapOk) {
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(mapImg, ox, oy, S, S);
+    ctx.globalAlpha = 1;
+  }
+  drawGrid(ox, oy, S);
+  ctx.strokeStyle = '#1a2a3a';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ox, oy, S, S);
+
+  for (var i = 0; i < ents.length; i++) drawEnt(ents[i], ox, oy, S);
+}
+
+// ── status / HUD ──
+var shownKind = '', lastHud = 0, rateCount = 0, rate = 0, rateAt = 0;
+function setKind(kind) {
+  if (kind === shownKind) return;
+  shownKind = kind;
+  elDisc.classList.toggle('hidden', kind === 'live');
+  elDisc.classList.toggle('stale', kind === 'stale');
+  if (kind === 'stale') { elTitle.textContent = 'NO DATA'; elSub.textContent = 'host is connected but sending no frames'; }
+  else if (kind === 'ws') { elTitle.textContent = 'DMA DISCONNECTED'; elSub.textContent = 'reconnecting...'; }
+  else { elTitle.textContent = 'DMA DISCONNECTED'; elSub.textContent = 'waiting for host...'; }
+  elStatus.textContent = kind === 'live' ? 'LIVE' : (kind === 'stale' ? 'NO DATA' : 'DISCONNECTED');
+  elStatus.style.color = kind === 'live' ? '#00ff88' : (kind === 'stale' ? '#ffb020' : '#ff3344');
+}
+
+function updateHud(now) {
+  var enemies = 0, team = 0, i;
+  for (i = 0; i < ents.length; i++) {
+    if (ents[i].rank === 0) enemies++;
+    else if (ents[i].rank === 1) team++;
+  }
+  elCounts.textContent = shownKind === 'live' ? 'enemies ' + enemies + '  team ' + team : '';
+  elRate.textContent = shownKind === 'live' ? rate + ' Hz' : '';
+}
+
+// ── socket ──
+var ws = null, wsAlive = false, hostUp = false, lastFrameAt = 0, retry = null;
+
+function connect() {
+  clearTimeout(retry);
+  retry = null;
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  var sock;
+  try {
+    sock = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/?role=viewer');
+  } catch (err) {
+    retry = setTimeout(connect, 5000);
+    return;
+  }
+  ws = sock;
+  sock.onopen = function () { if (sock === ws) wsAlive = true; };
+  sock.onmessage = function (ev) {
+    if (sock !== ws) return;
+    var f;
+    try { f = JSON.parse(ev.data); } catch (err) { return; }
+    if (!f || typeof f !== 'object') return;
+    if (f.connected && Array.isArray(f.players)) {
+      hostUp = true;
+      lastFrameAt = performance.now();
+      rateCount++;
+      applyFrame(f.players);
+    } else {
+      hostUp = false;
+      ents = [];
+    }
+  };
+  sock.onclose = function () {
+    if (sock !== ws) return;
+    wsAlive = false;
+    hostUp = false;
+    ents = [];
+    retry = setTimeout(connect, 5000);
+  };
+  sock.onerror = function () {};
+}
+
+// ── keep the phone screen on ──
+function wake() {
+  try {
+    if (navigator.wakeLock && document.visibilityState === 'visible') {
+      navigator.wakeLock.request('screen').catch(function () {});
+    }
+  } catch (err) {}
+}
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState !== 'visible') return;
+  wake();
+  if (!wsAlive) connect();
+});
+
+// ── loop ──
+var last = performance.now();
+function frame(now) {
+  var dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+
+  var kind = !wsAlive ? 'ws' : (!hostUp ? 'host' : (now - lastFrameAt > STALE_MS ? 'stale' : 'live'));
+  setKind(kind);
+  step(dt);
+  draw();
+
+  if (now - rateAt >= 1000) { rate = rateCount; rateCount = 0; rateAt = now; }
+  if (now - lastHud >= 250) { lastHud = now; updateHud(now); }
+  requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+setKind('ws');
+connect();
+wake();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
