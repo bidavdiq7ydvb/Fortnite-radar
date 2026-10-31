@@ -8,11 +8,30 @@
  *
  *   x / y   normalised 0..1, top-left origin
  *
+ * Instead of x / y a player may carry raw game coordinates:
+ *   wx / wy   Unreal world X / Y in cm, exactly as read from the actor. Needs the frame's
+ *             "map" (an id or name from maps.json) to have "world" bounds; the server then does
+ *             the conversion, so the cheat needs no map maths. If x / y are also sent they win.
+ *
  * Optional per-player fields (the viewer uses them when they are there):
  *   id      stable number or string per player -> exact tracking between frames
  *   yaw     degrees, 0 = up / north, clockwise -> facing wedge
  *   name    string, up to 24 characters
+ *   weapon  string, up to 32 characters (what they hold)
  *   down    true while knocked
+ *   bot     true for AI bots        npc   true for NPCs
+ * Optional top-level fields:
+ *   map             map name / id; the "Automatic" map choice matches it
+ *   scale           metres across the full map width -> distances
+ *   renderDistance  metres -> the circle around the tracked player
+ *
+ * Maps: public/maps.json lists them. Detailed maps are tile pyramids in public/tiles/<id>/<level>/<x>_<y>.webp
+ * ("tiles" entry, the viewer loads only what is on screen). A plain image in public/maps/ (png, jpg, webp)
+ * also works and is listed automatically when there is no maps.json. An entry looks like:
+ *   { "id": "main", "name": "Main Island", "image": "/maps/main.webp",
+ *     "scale": 3000,                     (metres across the image)
+ *     "world": { "x0": -141583, "x1": 158339, "y0": -149559, "y1": 150364 },   (world X / Y at the image edges)
+ *     "pois": [ { "name": "Somewhere", "x": 0.4, "y": 0.3 } ] }
  *
  * Every frame is validated and rebuilt before it is forwarded, so viewers only
  * ever receive the fields above.
@@ -36,7 +55,7 @@ const PING_EVERY_MS = 15000;
 const HOST_SILENT_MS = 60000;
 const VIEWER_SILENT_MS = 45000;
 const BAD_SECRET_LIMIT = 10;      // wrong secrets per minute per address
-const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_DIR = process.env.RADAR_PUBLIC || path.join(__dirname, 'public');
 
 if (!SECRET) {
   console.error('[radar] RADAR_SECRET is not set: host connections will be REFUSED until it is.');
@@ -50,7 +69,11 @@ try {
   process.exit(1);
 }
 
-const MAP_TYPES = { 'map.png': 'image/png', 'map.jpg': 'image/jpeg', 'map.webp': 'image/webp' };
+const MAP_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+const MAPS_DIR = path.join(PUBLIC_DIR, 'maps');
+const TILES_DIR = path.join(PUBLIC_DIR, 'tiles');
+const TILE_PATH = /^\/tiles\/([a-z0-9-]{1,48})\/(\d{1,2})\/(\d{1,3})_(\d{1,3})\.webp$/;
+const IMAGE_NAME = /^[A-Za-z0-9._ -]+\.(png|jpe?g|webp)$/i;
 const DISC = JSON.stringify({ connected: false, players: [] });
 
 // ── secret check ────────────────────────────────────────────────────────────
@@ -81,7 +104,40 @@ const num = (v, lo, hi, d) => {
   v = Number(v);
   return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
 };
-const r5 = v => Math.round(v * 1e5) / 1e5;
+const r6 = v => Math.round(v * 1e6) / 1e6;
+const str = (v, n) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, n) : '');
+const posNum = (v, max) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(v, max) : 0);
+
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const inView = v => Math.min(2, Math.max(-1, v));
+
+let mapsCache = { at: 0, mtime: -1, list: [] };
+function getMaps() {
+  const now = Date.now();
+  if (now - mapsCache.at < 2000) return mapsCache.list;
+  mapsCache.at = now;
+  try {
+    const m = fs.statSync(path.join(PUBLIC_DIR, 'maps.json')).mtimeMs;
+    if (m !== mapsCache.mtime) { mapsCache.mtime = m; mapsCache.list = listMaps().maps; }
+  } catch {
+    mapsCache.mtime = -1;
+    mapsCache.list = listMaps().maps;
+  }
+  return mapsCache.list;
+}
+function findMap(name) {
+  const w = String(name || '').toLowerCase();
+  if (!w) return null;
+  return getMaps().find(m => m && (String(m.id || '').toLowerCase() === w || String(m.name || '').toLowerCase() === w)) || null;
+}
+
+let lastWarnAt = 0;
+function warnUnmapped(mapName, why) {
+  const now = Date.now();
+  if (now - lastWarnAt < 10000) return;
+  lastWarnAt = now;
+  console.log('[radar] dropping players sent as world coordinates: ' + why + (mapName ? ' (map "' + mapName + '")' : ''));
+}
 
 function cleanFrame(text) {
   let f;
@@ -90,16 +146,30 @@ function cleanFrame(text) {
   if (f.connected === false) return DISC;
   if (!Array.isArray(f.players)) return null;
 
+  const mapName = str(f.map, 40);
+  const wm = mapName ? findMap(mapName) : null;
+  const w = wm && wm.world;
+  const world = w && isNum(w.x0) && isNum(w.x1) && isNum(w.y0) && isNum(w.y1) && w.x1 !== w.x0 && w.y1 !== w.y0 ? w : null;
+
   const players = [];
   for (const p of f.players) {
     if (players.length >= MAX_PLAYERS) break;
     if (!p || typeof p !== 'object') continue;
-    if (typeof p.x !== 'number' || typeof p.y !== 'number') continue;
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+
+    let x, y;
+    if (isNum(p.x) && isNum(p.y)) {
+      x = p.x; y = p.y;
+    } else if (isNum(p.wx) && isNum(p.wy)) {
+      if (!world) { warnUnmapped(mapName, mapName ? 'that map has no "world" bounds' : 'the frame has no "map"'); continue; }
+      x = (p.wx - world.x0) / (world.x1 - world.x0);
+      y = (p.wy - world.y0) / (world.y1 - world.y0);
+    } else {
+      continue;
+    }
 
     const o = {
-      x: r5(p.x),
-      y: r5(p.y),
+      x: r6(inView(x)),
+      y: r6(inView(y)),
       isLocal: p.isLocal === true,
       hp: Math.round(num(p.hp, 0, 100, 0)),
       shield: Math.round(num(p.shield, 0, 100, 0)),
@@ -111,14 +181,43 @@ function cleanFrame(text) {
     if (typeof p.yaw === 'number' && Number.isFinite(p.yaw)) {
       o.yaw = Math.round((((p.yaw % 360) + 360) % 360) * 10) / 10;
     }
-    if (typeof p.name === 'string') {
-      const name = p.name.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 24);
-      if (name) o.name = name;
-    }
+    const name = str(p.name, 24);
+    if (name) o.name = name;
+    const weapon = str(p.weapon, 32);
+    if (weapon) o.weapon = weapon;
     if (p.down === true) o.down = true;
+    if (p.bot === true) o.bot = true;
+    if (p.npc === true) o.npc = true;
     players.push(o);
   }
-  return JSON.stringify({ connected: true, players });
+
+  const out = { connected: true, players };
+  const map = str(f.map, 40);
+  if (map) out.map = map;
+  const scale = posNum(f.scale, 1e6);
+  if (scale) out.scale = scale;
+  const renderDistance = posNum(f.renderDistance, 1e6);
+  if (renderDistance) out.renderDistance = renderDistance;
+  return JSON.stringify(out);
+}
+
+// ── maps ────────────────────────────────────────────────────────────────────
+function listMaps() {
+  let custom = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'maps.json'), 'utf8'));
+    if (j && Array.isArray(j.maps)) custom = j.maps;
+  } catch { /* none, or not valid: fall back to the folder */ }
+  if (custom) return { maps: custom };
+
+  let files = [];
+  try { files = fs.readdirSync(MAPS_DIR).filter(n => IMAGE_NAME.test(n)).sort(); } catch { /* no folder */ }
+  return {
+    maps: files.map(n => {
+      const id = n.replace(/\.[^.]+$/, '');
+      return { id, name: id.replace(/[-_]+/g, ' '), image: '/maps/' + encodeURIComponent(n) };
+    }),
+  };
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -147,16 +246,36 @@ const server = http.createServer((req, res) => {
       JSON.stringify({ ok: true, host: !!host, viewers: viewers.size }));
   }
 
-  if (pathname === '/map') {
-    const names = Object.keys(MAP_TYPES);
-    const tryNext = i => {
-      if (i >= names.length) return send(204, { 'Cache-Control': 'no-cache' });
-      fs.readFile(path.join(PUBLIC_DIR, names[i]), (err, data) => {
-        if (err) return tryNext(i + 1);
-        send(200, { 'Content-Type': MAP_TYPES[names[i]], 'Cache-Control': 'no-cache' }, data);
+  if (pathname === '/maps.json') {
+    return send(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }, JSON.stringify(listMaps()));
+  }
+
+  if (pathname.startsWith('/maps/')) {
+    let name;
+    try { name = decodeURIComponent(pathname.slice(6)); } catch { return send(404); }
+    if (!IMAGE_NAME.test(name) || path.basename(name) !== name) return send(404);
+    return fs.readFile(path.join(MAPS_DIR, name), (err, data) => {
+      if (err) return send(404);
+      send(200, {
+        'Content-Type': MAP_TYPES[path.extname(name).toLowerCase()],
+        'Cache-Control': 'public, max-age=3600',
+      }, data);
+    });
+  }
+
+  const tm = TILE_PATH.exec(pathname);
+  if (tm) {
+    const file = path.join(TILES_DIR, tm[1], tm[2], tm[3] + '_' + tm[4] + '.webp');
+    return fs.stat(file, (err, st) => {
+      if (err || !st.isFile()) return send(404);
+      const etag = 'W/"' + st.size + '-' + Math.round(st.mtimeMs) + '"';
+      const cache = { ETag: etag, 'Cache-Control': 'public, max-age=3600' };
+      if (req.headers['if-none-match'] === etag) return send(304, cache);
+      fs.readFile(file, (err2, data) => {
+        if (err2) return send(404);
+        send(200, Object.assign({ 'Content-Type': 'image/webp' }, cache), data);
       });
-    };
-    return tryNext(0);
+    });
   }
 
   send(404);
