@@ -3,100 +3,129 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#0a0c18">
-<title>Radar</title>
+<meta name="theme-color" content="#060606">
+<meta name="color-scheme" content="dark">
+<title>Rextra Radar</title>
 <style>
-:root{--sw:264px;--bg:#060912;--panel:#0b0e1c;--line:rgba(255,255,255,.07);--card:rgba(255,255,255,.035);--accent:#5b5bf5;--text:#e6ebf7;--dim:#7d88a3;--good:#2ee59d;--warn:#ffb020;--bad:#ff4d5e}
+/* The look of the Rextra menu (src/ui/theme.h): black (#060606, never pure black), neutral grey borders, white text with softer whites for what is secondary or off, and ONE accent colour
+   (the menu's, #FFB7D5) for everything that is coloured. Cards are told apart by their borders, not by a lighter fill; every card title has the accent hairline under it. */
+:root{--sidew:300px;--sw:var(--sidew);
+  --black:#060606;--line:#262626;--side-line:#1e1e1e;--ctrl:#2c2c2c;--chk:#3c3c3c;--track:#1e1e1e;--hover:#141414;
+  --accent:#ffb7d5;--ar:255,183,213;
+  --text:#fff;--dim:#b4b4b4;--faint:#8c8c8c;
+  --font:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;
+  color-scheme:dark}
 *{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--text);overflow:hidden;overscroll-behavior:none;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--black);color:var(--text);overflow:hidden;overscroll-behavior:none;font-family:var(--font);font-size:14px;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent}
 body.side-closed{--sw:0px}
 @media (max-width:760px){:root{--sw:0px}}
-button{font:inherit;color:inherit}
+button,input,select,textarea{font:inherit;color:inherit}
 .hidden{display:none!important}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-#stage{position:fixed;left:0;top:0;bottom:0;right:var(--sw);overflow:hidden;background:#04070b;user-select:none;-webkit-user-select:none}
+#stage{position:fixed;left:0;top:0;bottom:0;right:var(--sw);overflow:hidden;background:var(--black);user-select:none;-webkit-user-select:none}
 #c{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
 #c:active{cursor:grabbing}
 
-.fab{position:absolute;width:34px;height:34px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(10,13,26,.86);color:#dfe5f5;font-size:18px;line-height:1;cursor:pointer;touch-action:manipulation;backdrop-filter:blur(6px)}
-.fab:hover{background:rgba(30,36,64,.95)}
-.fab:active{transform:scale(.96)}
+/* the buttons on the map: black plates with the menu's control border, the accent on hover */
+.fab{position:absolute;width:36px;height:36px;display:grid;place-items:center;padding:0;border:1px solid var(--ctrl);border-radius:10px;background:rgba(6,6,6,.88);color:#fff;font-size:18px;line-height:1;cursor:pointer;touch-action:manipulation;transition:border-color .12s,background .12s,transform .08s}
+.fab:hover{border-color:rgba(var(--ar),.55);background:rgba(20,20,20,.96)}
+.fab:active{transform:scale(.95)}
+.fab:focus-visible{outline:none;border-color:var(--accent)}
 .fab svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 #b-side{top:12px;right:12px}
 #zoom{position:absolute;left:12px;bottom:12px;display:flex;flex-direction:column;gap:6px}
 #zoom .fab{position:static}
-#mapid{position:absolute;left:12px;top:12px;padding:6px 11px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(10,13,26,.86);font-size:12px;font-weight:600;letter-spacing:.03em;pointer-events:none}
+/* islands: the menu's rounded status pill (accent-tinted rim) and its plain info plate */
+#mapid{position:absolute;left:12px;top:12px;padding:7px 14px;border:1px solid rgba(var(--ar),.32);border-radius:999px;background:rgba(6,6,6,.9);font-size:12px;font-weight:600;letter-spacing:.02em;pointer-events:none}
+#coord{position:absolute;right:12px;bottom:12px;padding:6px 10px;border:1px solid var(--ctrl);border-radius:10px;background:rgba(6,6,6,.9);font:11px/1.5 var(--mono);color:var(--dim);pointer-events:none;white-space:pre;text-align:right}
+#disc{position:absolute;inset:0;background:rgba(6,6,6,.82);display:flex;align-items:center;justify-content:center;pointer-events:none}
+#disc .dc{display:flex;flex-direction:column;align-items:center;gap:10px;max-width:86%;padding:22px 34px;border:1px solid rgba(var(--ar),.3);border-radius:16px;background:var(--black);text-align:center}
+#disc .dd{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px rgba(var(--ar),.8);animation:pulse 1.4s ease-in-out infinite}
+#disc.stale .dd{background:var(--faint);box-shadow:none}
+#disc p{margin:0;font-size:clamp(13px,2.6vw,17px);letter-spacing:.18em;font-weight:600}
+#disc small{color:var(--faint);font-size:12px;letter-spacing:.04em}
+#calbanner{position:absolute;left:50%;top:12px;transform:translateX(-50%);padding:9px 18px;border-radius:999px;background:var(--accent);color:#1a1a1a;font-size:13px;font-weight:600;box-shadow:0 0 18px rgba(var(--ar),.35);pointer-events:none;z-index:6;white-space:nowrap}
 
-#coord{position:absolute;right:12px;bottom:12px;padding:5px 9px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(10,13,26,.86);font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#c8d6e5;pointer-events:none;white-space:pre;text-align:right}
-#disc{position:absolute;inset:0;background:rgba(0,0,0,.82);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;pointer-events:none}
-#disc p{margin:0;color:var(--bad);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:clamp(14px,3.5vw,28px);letter-spacing:.15em;font-weight:700;text-align:center}
-#disc small{color:#56637c;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;letter-spacing:.05em}
-#disc.stale p{color:var(--warn)}
-
-#side{position:fixed;top:0;right:0;bottom:0;width:264px;display:flex;flex-direction:column;gap:12px;padding:16px 14px 18px;overflow-y:auto;background:linear-gradient(180deg,#0f1226 0%,#0a0c18 55%,#080a14 100%);border-left:1px solid var(--line);z-index:10;scrollbar-width:thin;scrollbar-color:#262c4a transparent}
+#side{position:fixed;top:0;right:0;bottom:0;width:var(--sidew);display:flex;flex-direction:column;gap:10px;padding:14px 12px 16px;overflow-y:auto;background:var(--black);border-left:1px solid var(--side-line);z-index:10;scrollbar-width:thin;scrollbar-color:#3a3a3a transparent}
 body.ready #side{transition:transform .2s ease}
 body.side-closed #side{transform:translateX(100%);visibility:hidden}
 body.ready.side-closed #side{transition:transform .2s ease,visibility 0s .2s}
-@media (max-width:760px){#side{width:min(86vw,300px);box-shadow:-12px 0 32px rgba(0,0,0,.55)}}
+@media (max-width:760px){#side{width:min(88vw,320px);box-shadow:-12px 0 32px rgba(0,0,0,.6)}}
 
-#brand{display:flex;align-items:center;gap:10px;padding:2px 2px 4px}
-#brand svg{width:34px;height:34px;flex:none}
-#brand b{display:block;font-size:15px;letter-spacing:.14em;font-weight:800}
-#brand small{display:block;color:var(--dim);font-size:10px;letter-spacing:.2em;margin-top:1px}
+/* the title bar's wordmark: REX in white, TRA in the accent */
+#brand{display:flex;align-items:baseline;gap:14px;padding:2px 4px 4px}
+#brand .wm{font-size:17px;font-weight:700;letter-spacing:.01em}
+#brand .wm i{font-style:normal;color:var(--accent)}
+#brand .crumb{color:var(--faint);font-size:13px}
 
-.card{border:1px solid var(--line);background:var(--card);border-radius:10px}
-#status{display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 12px;font-size:12px}
-#dot{width:8px;height:8px;border-radius:50%;background:var(--dim);box-shadow:0 0 0 0 transparent;flex:none}
-#dot.live{background:var(--good);box-shadow:0 0 8px var(--good)}
-#dot.stale{background:var(--warn)}
-#dot.down{background:var(--bad)}
-#count{text-align:center;color:var(--dim);font-size:12px;margin-top:-4px}
-#track{padding:10px 12px;cursor:pointer;border-color:rgba(91,91,245,.45);background:linear-gradient(135deg,rgba(91,91,245,.16),rgba(150,80,220,.08))}
-#track small{display:block;color:var(--dim);font-size:9px;letter-spacing:.16em;font-weight:700}
-#track b{display:block;margin-top:3px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#status{display:flex;align-items:center;gap:10px;padding:9px 14px;border:1px solid rgba(var(--ar),.32);border-radius:999px;background:var(--black);font-size:12.5px}
+#dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+#dot.live{background:var(--accent);box-shadow:0 0 8px rgba(var(--ar),.8)}
+#dot.stale{background:var(--dim)}
+#dot.down{background:transparent;border:1.5px solid var(--faint);animation:pulse 1.6s ease-in-out infinite}
+#count{text-align:center;color:var(--faint);font-size:12px;margin-top:-2px}
+#track{position:relative;padding:11px 14px 11px 20px;cursor:pointer;border:1px solid var(--line);border-radius:12px;background:rgba(var(--ar),.08);transition:border-color .12s}
+#track:hover{border-color:rgba(var(--ar),.4)}
+#track::before{content:"";position:absolute;left:6px;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accent)}
+#track small{display:block;color:var(--faint);font-size:10px;letter-spacing:.14em;font-weight:600}
+#track b{display:block;margin-top:3px;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-.panel{border:1px solid var(--line);background:rgba(255,255,255,.025);border-radius:12px;padding:12px}
-.panel>header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;margin-bottom:6px}
-.panel h3{margin:0;font-size:11px;letter-spacing:.14em;font-weight:800}
-.panel h3::after{content:"";display:block;height:2px;width:70%;margin-top:6px;border-radius:2px;background:linear-gradient(90deg,var(--accent),rgba(255,70,110,.7),transparent)}
-.fold{width:22px;height:22px;border:1px solid var(--line);border-radius:6px;background:rgba(255,255,255,.04);cursor:pointer;font-size:10px;line-height:1}
+/* a card: black, a neutral border, the title in capitals with the accent hairline under it */
+.panel{border:1px solid var(--line);background:var(--black);border-radius:12px;padding:12px 14px 10px}
+.panel>header{position:relative;display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding-bottom:10px;margin-bottom:4px}
+.panel>header::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(var(--ar),.7) 50%,transparent)}
+.panel h3{margin:0;font-size:13px;letter-spacing:.05em;font-weight:400;text-transform:uppercase}
+.fold{width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--faint);cursor:pointer;font-size:9px;line-height:1;transition:color .12s,transform .12s}
+.fold:hover{color:#fff}
 .panel.collapsed .body{display:none}
 .panel.collapsed .fold{transform:rotate(-90deg)}
 
-.lbl{font-size:11px;font-weight:600;margin:10px 0 6px}
-select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-radius:8px;background:#06070f;color:var(--text);font:inherit;font-size:12px}
-.row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 10px;margin-top:6px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.03);font-size:11px;font-weight:600;cursor:pointer}
-.row:hover{background:rgba(255,255,255,.055)}
-.sw{position:relative;width:34px;height:18px;border:0;border-radius:9px;background:#2a2f4a;cursor:pointer;flex:none;transition:background .15s}
-.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s}
-.sw[aria-checked="true"]{background:var(--accent)}
-.sw[aria-checked="true"]::after{transform:translateX(16px)}
-#more-h{display:flex;align-items:center;gap:6px;margin:12px 2px 0;color:var(--dim);font-size:11px;cursor:pointer;user-select:none}
-#more-h i{display:inline-block;transition:transform .15s;font-style:normal;font-size:9px}
+.lbl{font-size:13px;color:var(--dim);margin:12px 0 6px}
+.pick{position:relative}
+.pick::after{content:"";position:absolute;right:14px;top:50%;width:6px;height:6px;border:solid var(--dim);border-width:0 1.5px 1.5px 0;transform:translateY(-72%) rotate(45deg);pointer-events:none}
+select{appearance:none;-webkit-appearance:none;width:100%;height:36px;padding:0 32px 0 12px;border:1px solid var(--ctrl);border-radius:8px;background:var(--black);font-size:14px;cursor:pointer;transition:border-color .12s}
+select:hover{border-color:#3c3c3c}
+select:focus-visible,input:focus-visible,textarea:focus-visible,.btn:focus-visible,.sw:focus-visible{outline:none;border-color:rgba(var(--ar),.7)}
+/* a row of the menu: the name, and a checkbox - the accent fill and a dark tick when it is on, a softer white for the name when it is off */
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 8px;margin:0 -8px;border-radius:8px;font-size:14px;cursor:pointer;transition:background .12s,color .12s}
+.row.off{color:var(--dim)}
+.row:hover{background:var(--hover)}
+.sw{position:relative;width:18px;height:18px;padding:0;border:1px solid var(--chk);border-radius:5px;background:var(--black);cursor:pointer;flex:none;transition:background .12s,border-color .12s,box-shadow .12s}
+.sw::after{content:"";position:absolute;left:5px;top:1px;width:5px;height:10px;border:solid #060606;border-width:0 2px 2px 0;transform:rotate(45deg) scale(0);transition:transform .12s}
+.sw[aria-checked="true"]{background:var(--accent);border-color:var(--accent);box-shadow:0 0 8px rgba(var(--ar),.35)}
+.sw[aria-checked="true"]::after{transform:rotate(45deg) scale(1)}
+#more-h{display:flex;align-items:center;gap:6px;margin:10px 0 0;padding:6px 0;color:var(--faint);font-size:12px;cursor:pointer;user-select:none;transition:color .12s}
+#more-h:hover{color:#fff}
+#more-h i{display:inline-block;transition:transform .15s;font-style:normal;font-size:8px}
 #more.collapsed #more-h i{transform:rotate(-90deg)}
 #more.collapsed #more-b{display:none}
 
 #plist{display:flex;flex-direction:column;gap:6px;margin-top:8px}
-.prow{display:grid;grid-template-columns:10px 1fr auto;gap:9px;align-items:center;padding:8px 9px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.03);cursor:pointer}
-.prow:hover{background:rgba(255,255,255,.06)}
-.prow.sel{border-color:rgba(91,91,245,.7);background:rgba(91,91,245,.14)}
-.pdot{width:9px;height:9px;border-radius:50%}
-.pn{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pw{display:block;color:var(--dim);font-size:10px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prow{position:relative;display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--black);cursor:pointer;transition:background .12s,border-color .12s}
+.prow:hover{background:var(--hover)}
+.prow.sel{border-color:rgba(var(--ar),.35);background:rgba(var(--ar),.09)}
+.prow.sel::before{content:"";position:absolute;left:3px;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accent)}
+.pdot{width:10px;height:10px;border-radius:50%}
+.pn{display:block;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pw{display:block;color:var(--faint);font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pr{text-align:right}
-.pd{display:block;color:var(--dim);font-size:10px;margin-bottom:4px;min-height:12px}
-.hb{position:relative;width:44px;height:4px;border-radius:2px;background:#171b30;overflow:hidden;margin-left:auto}
+.pd{display:block;color:var(--accent);font-size:11px;margin-bottom:4px;min-height:13px}
+.hb{position:relative;width:44px;height:4px;border-radius:2px;background:var(--track);overflow:hidden;margin-left:auto}
 .hb .h,.hb .s{position:absolute;left:0;top:0;bottom:0}
-.hb .s{top:auto;height:2px;background:#4a9dff}
-.hb .h{background:#22cc44}
-.btn{display:block;width:100%;margin-top:8px;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-radius:8px;background:rgba(255,255,255,.04);color:var(--text);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
-.btn:hover{background:rgba(255,255,255,.08)}
-.btn.on{border-color:#ff3df0;color:#ff9cf6}
-#cal-key{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-radius:8px;background:#06070f;color:var(--text);font:inherit;font-size:12px;margin-top:6px}
-.calmsg{margin-top:10px;font-size:11px;line-height:1.45;color:var(--dim)}
-#cal-out{width:100%;height:64px;margin-top:8px;background:#06070f;color:var(--dim);border:1px solid var(--line);border-radius:8px;font:10px ui-monospace,Menlo,Consolas,monospace;resize:vertical}
-#calbanner{position:absolute;left:50%;top:12px;transform:translateX(-50%);padding:8px 14px;border-radius:8px;background:rgba(255,61,240,.92);color:#fff;font-size:13px;font-weight:700;pointer-events:none;z-index:6;white-space:nowrap}
-#pempty{color:var(--dim);font-size:11px;text-align:center;padding:10px 0 2px}
+.hb .s{top:auto;height:2px;background:#fff}
+.hb .h{background:var(--accent)}
+#pempty{color:var(--faint);font-size:12px;text-align:center;padding:12px 0 4px}
+
+/* buttons: the menu's two - the accent one with dark text, and the plain one with a control border */
+.btn{display:block;width:100%;margin-top:8px;height:36px;padding:0 12px;border:1px solid var(--ctrl);border-radius:8px;background:var(--black);color:#fff;font-size:14px;cursor:pointer;transition:background .12s,border-color .12s,filter .12s}
+.btn:hover{background:var(--hover);border-color:#3c3c3c}
+.btn.pri,.btn.on{background:var(--accent);border-color:var(--accent);color:#1a1a1a;font-weight:600}
+.btn.pri:hover,.btn.on:hover{background:var(--accent);filter:brightness(1.06)}
+#cal-key{width:100%;height:36px;padding:0 12px;border:1px solid var(--ctrl);border-radius:8px;background:var(--black);font-size:14px;margin-top:2px;transition:border-color .12s}
+.calmsg{margin-top:12px;font-size:12.5px;line-height:1.5;color:var(--dim)}
+#cal-out{width:100%;height:64px;margin-top:8px;padding:8px 10px;background:var(--black);color:var(--dim);border:1px solid var(--line);border-radius:8px;font:10px/1.4 var(--mono);resize:vertical}
 </style>
 </head>
 <body>
@@ -113,24 +142,21 @@ select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-
     <button id="b-out" class="fab" aria-label="Zoom out">&minus;</button>
     <button id="b-fit" class="fab" aria-label="Fit the whole map"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
   </div>
-  <div id="disc"><p id="d-title">DMA DISCONNECTED</p><small id="d-sub">connecting...</small></div>
+  <div id="disc"><div class="dc"><i class="dd"></i><p id="d-title">DMA DISCONNECTED</p><small id="d-sub">connecting...</small></div></div>
 </div>
 
 <aside id="side">
-  <div id="brand">
-    <svg viewBox="0 0 40 40"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b5bf5"/><stop offset="1" stop-color="#d04a8c"/></linearGradient></defs><rect width="40" height="40" rx="10" fill="url(#g)"/><circle cx="20" cy="20" r="11" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="2"/><circle cx="20" cy="20" r="5" fill="none" stroke="#fff" stroke-opacity=".6" stroke-width="2"/><path d="M20 20L29 11" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="20" cy="20" r="2" fill="#fff"/></svg>
-    <div><b>RADAR</b><small>DMA LIVE MAP</small></div>
-  </div>
+  <div id="brand"><b class="wm">REX<i>TRA</i></b><span class="crumb">Rextra / Radar</span></div>
 
-  <div id="status" class="card"><span id="dot"></span><span id="st-text">Connecting...</span></div>
+  <div id="status"><span id="dot"></span><span id="st-text">Connecting...</span></div>
   <div id="count">0 Players</div>
-  <div id="track" class="card" title="Click to go back to your own player"><small>TRACKING</small><b id="tr-name">Local player</b></div>
+  <div id="track" title="Click to go back to your own player"><small>TRACKING</small><b id="tr-name">Local player</b></div>
 
   <section class="panel" id="p-settings">
     <header><h3>RADAR SETTINGS</h3><button class="fold" aria-label="Collapse">&#9660;</button></header>
     <div class="body">
       <div class="lbl">Map Selection</div>
-      <select id="map-sel"><option value="auto">Automatic</option></select>
+      <div class="pick"><select id="map-sel"><option value="auto">Automatic</option></select></div>
       <div id="sw-main"></div>
       <div id="more">
         <div id="more-h"><i>&#9660;</i> More Options</div>
@@ -145,7 +171,7 @@ select{width:100%;padding:9px 10px;border:1px solid rgba(255,255,255,.1);border-
       <div id="cal-lock">
         <div class="lbl">Radar secret (only you; kept in this browser)</div>
         <input id="cal-key" type="password" autocomplete="off" placeholder="the RADAR_SECRET">
-        <button id="cal-unlock" class="btn">Unlock</button>
+        <button id="cal-unlock" class="btn pri">Unlock</button>
       </div>
       <div id="cal-tools" class="hidden">
         <button id="cal-set" class="btn">Set my position</button>
@@ -199,19 +225,22 @@ function fetchStored(key) { try { return localStorage.getItem(key); } catch (e) 
 })();
 function setCfg(k, v) {
   cfg[k] = v;
-  if (switches[k]) switches[k].setAttribute('aria-checked', v ? 'true' : 'false');
+  if (switches[k]) {
+    switches[k].setAttribute('aria-checked', v ? 'true' : 'false');
+    switches[k].parentNode.classList.toggle('off', !v);          // an off row reads in a softer white, as in the menu
+  }
   store('radar.cfg', JSON.stringify(cfg));
   if (k === 'list') $('p-players').classList.toggle('hidden', !v);
   if (k === 'mapid') updateMapId();
 }
 DEFS.forEach(function (d) {
   var row = document.createElement('div');
-  row.className = 'row';
+  row.className = cfg[d.k] ? 'row' : 'row off';
   var span = document.createElement('span');
   span.textContent = d.l;
   var sw = document.createElement('button');
   sw.className = 'sw';
-  sw.setAttribute('role', 'switch');
+  sw.setAttribute('role', 'checkbox');
   sw.setAttribute('aria-label', d.l);
   sw.setAttribute('aria-checked', cfg[d.k] ? 'true' : 'false');
   row.appendChild(span);
@@ -491,8 +520,9 @@ window.addEventListener('keydown', function (e) {
 });
 
 // ── players ──
-var PALETTE = ['#ff4d4d', '#ff9f1a', '#ffd23f', '#c77dff', '#ff6ec7', '#3ddbd9', '#ff7a45', '#b8e04a', '#f06595', '#9775fa', '#ffa8a8', '#e599f7'];
-var COL_ME = '#00ff88', COL_TEAM = '#3399ff';
+// the colours of the cheat's own ESP: enemies magenta (the first entry, used when team colours are off), your team blue; you are white with the menu's accent ring
+var PALETTE = ['#eb46eb', '#ff9f1a', '#ffd23f', '#c77dff', '#ff6ec7', '#3ddbd9', '#ff7a45', '#b8e04a', '#f06595', '#9775fa', '#ffa8a8', '#e599f7'];
+var COL_ME = '#ffffff', COL_TEAM = '#4fa0ff', ACCENT = '#ffb7d5', ACCENT_RGB = '255,183,213';
 var ents = [], uidNext = 1, trackUid = 0, trk = null;
 function sq(v) { return v * v; }
 
@@ -598,7 +628,7 @@ function step(dt) {
 }
 
 // ── drawing ──
-var FONT = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
+var FONT = '"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,sans-serif';
 function label(t, x, y, col) {
   ctx.font = '600 10px ' + FONT;
   ctx.textAlign = 'center';
@@ -614,7 +644,7 @@ function drawGrid(ox, oy, S) {
   var minor = S * 0.025 >= 36, n = minor ? 40 : 10, every = minor ? 4 : 1, i, p, v;
   ctx.lineWidth = 1;
   for (i = 0; i <= n; i++) {
-    ctx.strokeStyle = i % every === 0 ? 'rgba(80,120,160,.24)' : 'rgba(80,120,160,.09)';
+    ctx.strokeStyle = i % every === 0 ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.045)';
     p = i / n * S;
     v = ox + p;
     if (v >= -1 && v <= W + 1) { ctx.beginPath(); ctx.moveTo(v, Math.max(oy, 0)); ctx.lineTo(v, Math.min(oy + S, H)); ctx.stroke(); }
@@ -660,7 +690,7 @@ function drawEnt(e, ox, oy, S) {
 
   ctx.lineWidth = 1.5;
   if (e.isLocal) {
-    ctx.strokeStyle = 'rgba(0,255,136,.4)';
+    ctx.strokeStyle = 'rgba(' + ACCENT_RGB + ',.7)';
     ctx.beginPath(); ctx.arc(sx, sy, R + 4, 0, Math.PI * 2); ctx.stroke();
   }
   if (e === trk && !e.isLocal) {
@@ -669,20 +699,20 @@ function drawEnt(e, ox, oy, S) {
   }
 
   var bw = 26, bh = 3, bx = sx - bw / 2, by = sy + R + 4, ty = by + bh + 1 + (e.shield > 0 ? bh + 1 : 0) + 9;
-  ctx.fillStyle = 'rgba(8,12,22,.85)';
+  ctx.fillStyle = 'rgba(6,6,6,.88)';
   ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2 + (e.shield > 0 ? bh + 1 : 0));
-  ctx.fillStyle = e.hp > 50 ? '#22cc44' : (e.hp > 25 ? '#ddaa00' : '#ff4422');
+  ctx.fillStyle = e.hp > 50 ? '#7fe3a6' : (e.hp > 25 ? '#f0c36a' : '#ff6b81');          // health keeps its traffic-light colours (data), softened to sit with the accent
   ctx.fillRect(bx, by, bw * e.hp / 100, bh);
   if (e.shield > 0) {
-    ctx.fillStyle = '#4499ff';
+    ctx.fillStyle = '#9fc4ff';
     ctx.fillRect(bx, by + bh + 1, bw * e.shield / 100, bh);
   }
 
-  if (cfg.names && e.name) label(e.name, sx, sy - R - 7, '#f1f5ff');
-  if (cfg.weapon && e.weapon) { label(e.weapon, sx, ty, '#ffd36b'); ty += 11; }
+  if (cfg.names && e.name) label(e.name, sx, sy - R - 7, '#ffffff');
+  if (cfg.weapon && e.weapon) { label(e.weapon, sx, ty, ACCENT); ty += 11; }              // values are in the accent, as the menu's slider values are
   if (cfg.dist && e !== trk) {
     var m = metres(e);
-    if (m >= 0) label(Math.round(m) + 'm', sx, ty, '#a9b8d4');
+    if (m >= 0) label(Math.round(m) + 'm', sx, ty, '#b4b4b4');
   }
 }
 
@@ -698,23 +728,23 @@ function drawScaleBar(S) {
   ctx.strokeStyle = 'rgba(0,0,0,.7)';
   ctx.beginPath(); ctx.moveTo(x, y - 5); ctx.lineTo(x, y); ctx.lineTo(x + len, y); ctx.lineTo(x + len, y - 5); ctx.stroke();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = '#f1f5ff';
+  ctx.strokeStyle = '#ffffff';
   ctx.beginPath(); ctx.moveTo(x, y - 5); ctx.lineTo(x, y); ctx.lineTo(x + len, y); ctx.lineTo(x + len, y - 5); ctx.stroke();
-  label(m >= 1000 ? (m / 1000) + ' km' : m + ' m', x + len / 2, y - 9, '#f1f5ff');
+  label(m >= 1000 ? (m / 1000) + ' km' : m + ' m', x + len / 2, y - 9, '#ffffff');
 }
 
 function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   frameNo++;
   var cm = currentMap(), tiled = !!(cm && cm.tiles), img = cm && !tiled ? mapImage(cm) : null;
-  ctx.fillStyle = (img || tiled) ? '#0a1b3d' : '#04070b';
+  ctx.fillStyle = (img || tiled) ? '#0a1b3d' : '#060606';              // (the sea colour behind the tiles is the map's own)
   ctx.fillRect(0, 0, W, H);
 
   var S = mapPx(), ox = W / 2 - view.cx * S, oy = H / 2 - view.cy * S, i, e;
   if (tiled) drawTiled(cm, ox, oy, S);
   else if (img) ctx.drawImage(img, ox, oy, S, S);
-  else { ctx.fillStyle = '#0a1018'; ctx.fillRect(ox, oy, S, S); drawGrid(ox, oy, S); }
-  ctx.strokeStyle = (img || tiled) ? 'rgba(255,255,255,.12)' : '#1a2a3a';
+  else { ctx.fillStyle = '#0b0b0b'; ctx.fillRect(ox, oy, S, S); drawGrid(ox, oy, S); }
+  ctx.strokeStyle = (img || tiled) ? 'rgba(255,255,255,.12)' : '#262626';
   ctx.lineWidth = 2;
   ctx.strokeRect(ox, oy, S, S);
 
@@ -724,8 +754,8 @@ function draw() {
       if (px < -80 || px > W + 80 || py < -20 || py > H + 20) continue;
       ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
       ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.stroke();
-      ctx.fillStyle = '#ffd36b'; ctx.fill();
-      if (view.zoom >= 1.3) label(p.name, px, py - 7, '#ffe9b0');
+      ctx.fillStyle = '#ffffff'; ctx.fill();
+      if (view.zoom >= 1.3) label(p.name, px, py - 7, '#e6e6e6');
     }
   }
 
@@ -734,9 +764,9 @@ function draw() {
     var rr = meta.renderDistance / sc * S;
     ctx.beginPath();
     ctx.arc(ox + trk.dx * S, oy + trk.dy * S, rr, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(30,70,170,.16)';
+    ctx.fillStyle = 'rgba(' + ACCENT_RGB + ',.07)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(150,190,255,.65)';
+    ctx.strokeStyle = 'rgba(' + ACCENT_RGB + ',.6)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -934,11 +964,11 @@ function drawCalAnchors(ox, oy, S) {
   if (!isAdmin || !m || !calMaps[m.id]) return;
   var a = calMaps[m.id].anchors || [], i, x, y;
   ctx.lineWidth = 2;
-  ctx.strokeStyle = '#ff3df0';
+  ctx.strokeStyle = ACCENT;
   for (i = 0; i < a.length; i++) {
     x = ox + a[i].u * S; y = oy + a[i].v * S;
     ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y); ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); ctx.stroke();
-    label(String(i + 1), x + 11, y - 7, '#ff9cf6');
+    label(String(i + 1), x + 11, y - 7, '#ffd6e6');
   }
 }
 calUi();
